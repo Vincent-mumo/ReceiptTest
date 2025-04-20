@@ -10,67 +10,65 @@ function App() {
 
   useEffect(() => {
     // Enable debug logging
-    window.qz.api.showDebug(true);
+    if (window.qz) {
+      window.qz.api.showDebug(true);
+    }
 
-    // Load certificate
-    $.ajax({ url: '/certificate.pem', cache: false }).then(
-      (cert) => {
-        window.qz.security.setCertificatePromise((resolve) => {
-          resolve(cert);
-        });
-        connectQZ();
-      },
-      () => {
-        setStatus('Failed to load certificate');
-        console.error('Error loading certificate');
-      }
-    );
-
-    // Client-side signing using Web Crypto API (testing only)
-    window.qz.security.setSignaturePromise((toSign) => {
-      return (resolve, reject) => {
-        try {
-          // Convert string to ArrayBuffer
-          const encoder = new TextEncoder();
-          const data = encoder.encode(toSign);
-          // Compute SHA-1 hash
-          crypto.subtle.digest('SHA-1', data).then((hashBuffer) => {
-            // Convert hash to hex string
-            const hashArray = Array.from(new Uint8Array(hashBuffer));
-            const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-            resolve(hashHex);
-          }).catch((err) => {
+    // Load certificate and setup security
+    const initializeQZ = async () => {
+      try {
+        const cert = await $.ajax({ url: '/certificate.pem', cache: false });
+        
+        window.qz.security.setCertificatePromise((resolve) => resolve(cert));
+        
+        // Set up signature promise for silent printing
+        window.qz.security.setSignaturePromise((toSign) => (resolve, reject) => {
+          try {
+            // For testing, you can use this simple SHA-1 hash
+            // In production, use proper signing from your backend
+            const hash = window.qz.security.sha256(toSign);
+            resolve(hash);
+          } catch (err) {
             reject(err);
-          });
-        } catch (err) {
-          reject(err);
-        }
-      };
-    });
+          }
+        });
 
-    // Cleanup
+        await connectQZ();
+      } catch (err) {
+        setStatus(`Initialization failed: ${err.message}`);
+        console.error('Initialization error:', err);
+      }
+    };
+
+    if (window.qz) {
+      initializeQZ();
+    } else {
+      setStatus('QZ Tray script not loaded. Make sure qz-tray.js is in your public folder.');
+    }
+
     return () => {
-      if (window.qz.websocket.isActive()) {
-        window.qz.websocket.disconnect().catch((err) => console.error('Disconnect error:', err));
+      if (window.qz && window.qz.websocket.isActive()) {
+        window.qz.websocket.disconnect().catch(err => console.error('Disconnect error:', err));
       }
     };
   }, []);
 
   const connectQZ = async () => {
-    if (!window.qz) {
-      setStatus('QZ Tray script not loaded');
-      return;
-    }
-
     if (!window.qz.websocket.isActive()) {
       try {
-        await window.qz.websocket.connect();
-        setStatus('Connected to QZ Tray');
+        await window.qz.websocket.connect({
+          host: 'localhost',
+          port: 8181,
+          bypassSSLError: true,
+          retries: 3,
+          delay: 1
+        });
         setConnected(true);
-        loadPrinters();
+        setStatus('Connected to QZ Tray');
+        await loadPrinters();
       } catch (err) {
-        setStatus(`Failed to connect to QZ Tray: ${err.message || err}`);
-        console.error('Connection error:', err);
+        setStatus(`Connection failed: ${err.message}`);
+        throw err;
       }
     }
   };
@@ -79,11 +77,15 @@ function App() {
     try {
       const printerList = await window.qz.printers.find();
       setPrinters(printerList);
-      setSelectedPrinter(printerList[0] || '');
-      setStatus(printerList.length > 0 ? `Found ${printerList.length} printer(s)` : 'No printers found');
+      if (printerList.length > 0) {
+        setSelectedPrinter(printerList[0]);
+        setStatus(`Found ${printerList.length} printer(s)`);
+      } else {
+        setStatus('No printers found');
+      }
     } catch (err) {
-      setStatus(`Could not list printers: ${err.message || err}`);
-      console.error('Printer discovery error:', err);
+      setStatus(`Printer discovery failed: ${err.message}`);
+      throw err;
     }
   };
 
@@ -94,34 +96,38 @@ function App() {
     }
 
     try {
+      // Create printer config with silent printing options
       const config = window.qz.configs.create(selectedPrinter, {
-        scaleContent: true,
-        units: 'in',
-        density: 203,
+        scaleContent: false,
+        silent: true,  // This attempts to suppress any dialogs
+        jobName: 'POS Receipt',
+        copies: 1,
+        altPrinting: true  // Helps with some POS printers
       });
 
+      // ESC/POS commands for better compatibility with POS printers
       const esc = '\x1B';
       const gs = '\x1D';
       const cmds = [
-        esc + '@',
-        esc + 'a' + '\x01',
+        esc + '@',  // Initialize printer
+        esc + 'a' + '\x01',  // Center align
         'POS PRINTER TEST\n\n',
-        esc + 'a' + '\x00',
+        esc + 'a' + '\x00',  // Left align
         'Item 1          $10.00\n',
         'Item 2          $15.50\n',
         '------------------------\n',
         'TOTAL           $25.50\n\n',
-        esc + 'a' + '\x01',
+        esc + 'a' + '\x01',  // Center align
         'Thank you!\n',
         new Date().toLocaleString() + '\n\n',
-        gs + 'V' + '\x41' + '\x10',
-        esc + 'p' + '\x00' + '\x19' + '\xFA',
+        gs + 'V' + '\x41' + '\x00',  // Full cut
+        esc + 'd' + '\x03'  // Feed 3 lines
       ];
 
       await window.qz.print(config, cmds);
-      setStatus('Print job sent!');
+      setStatus('Print job sent successfully!');
     } catch (err) {
-      setStatus(`Print failed: ${err.message || err}`);
+      setStatus(`Print failed: ${err.message}`);
       console.error('Print error:', err);
     }
   };
@@ -130,9 +136,12 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>QZ Tray POS Printing</h1>
-        <p>Status: <strong>{status}</strong></p>
+        <div className="status">
+          <p><strong>{status}</strong></p>
+          <p>Connection: {connected ? '✅ Connected' : '❌ Disconnected'}</p>
+        </div>
 
-        {connected && printers.length > 0 && (
+        {connected && (
           <>
             <div>
               <label>Select Printer: </label>
@@ -140,10 +149,10 @@ function App() {
                 value={selectedPrinter}
                 onChange={(e) => setSelectedPrinter(e.target.value)}
               >
-                <option value="">Select a printer</option>
-                {printers.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
+                {printers.length === 0 && <option value="">No printers found</option>}
+                {printers.map((printer) => (
+                  <option key={printer} value={printer}>
+                    {printer}
                   </option>
                 ))}
               </select>
@@ -153,7 +162,7 @@ function App() {
                 Print Test Receipt
               </button>
               <button onClick={loadPrinters} style={{ marginLeft: '1rem' }}>
-                Reload Printers
+                Refresh Printers
               </button>
             </div>
           </>
@@ -166,6 +175,7 @@ function App() {
               href="https://qz.io/download/"
               target="_blank"
               rel="noopener noreferrer"
+              style={{ color: 'lightblue' }}
             >
               Download QZ Tray
             </a>
