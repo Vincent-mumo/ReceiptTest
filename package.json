@@ -10,7 +10,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "buffer": "^6.0.3",
+    "escpos-buffer": "^4.1.0",
     "jquery": "^3.7.1",
+    "jsprintmanager": "^7.0.2",
+    "jsrsasign": "^11.1.0",
+    "mdns-js": "^1.0.3",
+    "print-js": "^1.6.0",
+    "qz-tray": "^2.2.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

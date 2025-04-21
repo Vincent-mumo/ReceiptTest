@@ -1,6 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import $ from 'jquery';
+import qz from 'qz-tray';
+import { KJUR } from 'jsrsasign'; // Only for signing
 import './App.css';
+
+// Custom hex to base64 converter
+const hexToBase64 = (hex) => {
+  try {
+    hex = hex.replace(/\s|0x/g, '');
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+    }
+    return btoa(String.fromCharCode(...bytes));
+  } catch (err) {
+    throw new Error('Failed to convert hex to base64: ' + err.message);
+  }
+};
 
 function App() {
   const [printers, setPrinters] = useState([]);
@@ -10,82 +26,109 @@ function App() {
 
   useEffect(() => {
     // Enable debug logging
-    if (window.qz) {
-      window.qz.api.showDebug(true);
-    }
+    qz.api.showDebug(true);
 
-    // Load certificate and setup security
-    const initializeQZ = async () => {
-      try {
-        const cert = await $.ajax({ url: '/certificate.pem', cache: false });
-        
-        window.qz.security.setCertificatePromise((resolve) => resolve(cert));
-        
-        // Set up signature promise for silent printing
-        window.qz.security.setSignaturePromise((toSign) => (resolve, reject) => {
-          try {
-            // For testing, you can use this simple SHA-1 hash
-            // In production, use proper signing from your backend
-            const hash = window.qz.security.sha256(toSign);
-            resolve(hash);
-          } catch (err) {
-            reject(err);
-          }
+    // Log KJUR to verify signing capability
+    console.log('KJUR:', KJUR);
+
+    // Load certificate
+    $.ajax({ url: '/digital-certificate.txt', cache: false, dataType: 'text' }).then(
+      (cert) => {
+        if (!cert.includes('-----BEGIN CERTIFICATE-----')) {
+          setStatus('Invalid certificate format in digital-certificate.txt');
+          console.error('Certificate content is invalid:', cert.substring(0, 50) + '...');
+          return;
+        }
+        qz.security.setCertificatePromise((resolve) => {
+          resolve(cert);
         });
-
-        await connectQZ();
-      } catch (err) {
-        setStatus(`Initialization failed: ${err.message}`);
-        console.error('Initialization error:', err);
+        console.log('Certificate loaded successfully:', cert.substring(0, 50) + '...');
+        connectQZ();
+      },
+      (err) => {
+        setStatus('Failed to load digital-certificate.txt. Ensure it is in public/');
+        console.error('Error loading certificate:', err);
       }
-    };
+    );
 
-    if (window.qz) {
-      initializeQZ();
-    } else {
-      setStatus('QZ Tray script not loaded. Make sure qz-tray.js is in your public folder.');
-    }
+    // Client-side signing with jsrsasign (development only)
+    qz.security.setSignaturePromise((toSign) => {
+      return (resolve, reject) => {
+        // Fetch private key
+        $.ajax({ url: '/private-key.pem', cache: false, dataType: 'text' }).then(
+          (privateKey) => {
+            console.log('Private key loaded:', privateKey.substring(0, 50) + '...');
+            if (!privateKey.includes('-----BEGIN PRIVATE KEY-----')) {
+              console.error('Invalid private key format:', privateKey.substring(0, 50) + '...');
+              reject('Invalid private key format');
+              return;
+            }
+            try {
+              // Initialize RSA signature with jsrsasign
+              const sig = new KJUR.crypto.Signature({ alg: 'SHA1withRSA' });
+              sig.init(privateKey);
+              sig.updateString(toSign);
+              const signature = sig.sign();
+              console.log('Raw signature (hex):', signature);
+              // Convert to base64 using custom function
+              const base64Signature = hexToBase64(signature);
+              console.log('Generated signature for:', toSign, 'Base64 Signature:', base64Signature);
+              resolve(base64Signature);
+            } catch (err) {
+              console.error('Signing error:', err);
+              reject('Error signing message: ' + err.message);
+            }
+          },
+          (err) => {
+            console.error('Error fetching private key:', err);
+            reject('Error fetching private key: ' + err.message);
+          }
+        );
+      };
+    });
 
+    // Cleanup
     return () => {
-      if (window.qz && window.qz.websocket.isActive()) {
-        window.qz.websocket.disconnect().catch(err => console.error('Disconnect error:', err));
+      if (qz.websocket.isActive()) {
+        qz.websocket.disconnect().catch((err) => console.error('Disconnect error:', err));
       }
     };
   }, []);
 
   const connectQZ = async () => {
-    if (!window.qz.websocket.isActive()) {
+    if (!qz) {
+      setStatus('QZ Tray script not loaded');
+      console.error('QZ Tray script not loaded');
+      return;
+    }
+
+    if (!qz.websocket.isActive()) {
       try {
-        await window.qz.websocket.connect({
-          host: 'localhost',
-          port: 8181,
-          bypassSSLError: true,
-          retries: 3,
-          delay: 1
-        });
-        setConnected(true);
+        // Use ws:// for localhost
+        const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const useSecure = !isLocalhost;
+        console.log('Connecting with:', isLocalhost ? 'ws://' : 'wss://');
+        await qz.websocket.connect({ host: 'localhost', usingSecure: useSecure, retries: 3, delay: 1 });
         setStatus('Connected to QZ Tray');
-        await loadPrinters();
+        setConnected(true);
+        loadPrinters();
       } catch (err) {
-        setStatus(`Connection failed: ${err.message}`);
-        throw err;
+        setStatus(`Failed to connect to QZ Tray: ${err.message || err}`);
+        console.error('Connection error:', err);
       }
     }
   };
 
   const loadPrinters = async () => {
     try {
-      const printerList = await window.qz.printers.find();
+      const printerList = await qz.printers.find();
+      console.log('Printers found:', printerList);
       setPrinters(printerList);
-      if (printerList.length > 0) {
-        setSelectedPrinter(printerList[0]);
-        setStatus(`Found ${printerList.length} printer(s)`);
-      } else {
-        setStatus('No printers found');
-      }
+      setSelectedPrinter(printerList[0] || '');
+      setStatus(printerList.length > 0 ? `Found ${printerList.length} printer(s)` : 'No printers found');
     } catch (err) {
-      setStatus(`Printer discovery failed: ${err.message}`);
-      throw err;
+      setStatus(`Could not list printers: ${err.message || err}`);
+      console.error('Printer discovery error:', err);
     }
   };
 
@@ -96,38 +139,34 @@ function App() {
     }
 
     try {
-      // Create printer config with silent printing options
-      const config = window.qz.configs.create(selectedPrinter, {
-        scaleContent: false,
-        silent: true,  // This attempts to suppress any dialogs
-        jobName: 'POS Receipt',
-        copies: 1,
-        altPrinting: true  // Helps with some POS printers
+      const config = qz.configs.create(selectedPrinter, {
+        scaleContent: true,
+        units: 'in',
+        density: 203,
       });
 
-      // ESC/POS commands for better compatibility with POS printers
       const esc = '\x1B';
       const gs = '\x1D';
       const cmds = [
-        esc + '@',  // Initialize printer
-        esc + 'a' + '\x01',  // Center align
+        esc + '@', // Initialize printer
+        esc + 'a' + '\x01', // Center align
         'POS PRINTER TEST\n\n',
-        esc + 'a' + '\x00',  // Left align
+        esc + 'a' + '\x00', // Left align
         'Item 1          $10.00\n',
         'Item 2          $15.50\n',
         '------------------------\n',
         'TOTAL           $25.50\n\n',
-        esc + 'a' + '\x01',  // Center align
+        esc + 'a' + '\x01', // Center align
         'Thank you!\n',
         new Date().toLocaleString() + '\n\n',
-        gs + 'V' + '\x41' + '\x00',  // Full cut
-        esc + 'd' + '\x03'  // Feed 3 lines
+        gs + 'V' + '\x41' + '\x10', // Cut paper
+        esc + 'p' + '\x00' + '\x19' + '\xFA', // Open cash drawer
       ];
 
-      await window.qz.print(config, cmds);
-      setStatus('Print job sent successfully!');
+      await qz.print(config, cmds);
+      setStatus('Print job sent!');
     } catch (err) {
-      setStatus(`Print failed: ${err.message}`);
+      setStatus(`Print failed: ${err.message || err}`);
       console.error('Print error:', err);
     }
   };
@@ -136,12 +175,9 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>QZ Tray POS Printing</h1>
-        <div className="status">
-          <p><strong>{status}</strong></p>
-          <p>Connection: {connected ? '✅ Connected' : '❌ Disconnected'}</p>
-        </div>
+        <p>Status: <strong>{status}</strong></p>
 
-        {connected && (
+        {connected && printers.length > 0 && (
           <>
             <div>
               <label>Select Printer: </label>
@@ -149,10 +185,10 @@ function App() {
                 value={selectedPrinter}
                 onChange={(e) => setSelectedPrinter(e.target.value)}
               >
-                {printers.length === 0 && <option value="">No printers found</option>}
-                {printers.map((printer) => (
-                  <option key={printer} value={printer}>
-                    {printer}
+                <option value="">Select a printer</option>
+                {printers.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
                   </option>
                 ))}
               </select>
@@ -162,7 +198,7 @@ function App() {
                 Print Test Receipt
               </button>
               <button onClick={loadPrinters} style={{ marginLeft: '1rem' }}>
-                Refresh Printers
+                Reload Printers
               </button>
             </div>
           </>
@@ -175,7 +211,6 @@ function App() {
               href="https://qz.io/download/"
               target="_blank"
               rel="noopener noreferrer"
-              style={{ color: 'lightblue' }}
             >
               Download QZ Tray
             </a>
