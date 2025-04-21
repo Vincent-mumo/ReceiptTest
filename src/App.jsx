@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import $ from 'jquery';
 import qz from 'qz-tray';
-import { KJUR } from 'jsrsasign'; // Only for signing
+import { KJUR } from 'jsrsasign'; // For RSA-SHA1 signing
 import './App.css';
 
-// Custom hex to base64 converter
+// Custom hex to base64 converter (replaces jsrsasign's hextob64)
 const hexToBase64 = (hex) => {
   try {
     hex = hex.replace(/\s|0x/g, '');
@@ -25,17 +25,17 @@ function App() {
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    // Enable debug logging
+    // Enable QZ Tray debug logging
     qz.api.showDebug(true);
 
     // Log KJUR to verify signing capability
     console.log('KJUR:', KJUR);
 
-    // Load certificate
-    $.ajax({ url: '/digital-certificate.txt', cache: false, dataType: 'text' }).then(
+    // Load certificate (override.crt)
+    $.ajax({ url: '/override.crt', cache: false, dataType: 'text' }).then(
       (cert) => {
         if (!cert.includes('-----BEGIN CERTIFICATE-----')) {
-          setStatus('Invalid certificate format in digital-certificate.txt');
+          setStatus('Invalid certificate format in override.crt');
           console.error('Certificate content is invalid:', cert.substring(0, 50) + '...');
           return;
         }
@@ -46,7 +46,7 @@ function App() {
         connectQZ();
       },
       (err) => {
-        setStatus('Failed to load digital-certificate.txt. Ensure it is in public/');
+        setStatus('Failed to load override.crt. Ensure it is in public/');
         console.error('Error loading certificate:', err);
       }
     );
@@ -64,13 +64,13 @@ function App() {
               return;
             }
             try {
-              // Initialize RSA signature with jsrsasign
+              // Initialize RSA signature
               const sig = new KJUR.crypto.Signature({ alg: 'SHA1withRSA' });
               sig.init(privateKey);
               sig.updateString(toSign);
               const signature = sig.sign();
               console.log('Raw signature (hex):', signature);
-              // Convert to base64 using custom function
+              // Convert to base64
               const base64Signature = hexToBase64(signature);
               console.log('Generated signature for:', toSign, 'Base64 Signature:', base64Signature);
               resolve(base64Signature);
@@ -87,7 +87,7 @@ function App() {
       };
     });
 
-    // Cleanup
+    // Cleanup WebSocket on component unmount
     return () => {
       if (qz.websocket.isActive()) {
         qz.websocket.disconnect().catch((err) => console.error('Disconnect error:', err));
